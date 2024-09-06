@@ -1,9 +1,15 @@
 import * as cheerio from "cheerio";
-import { Client, Events, GatewayIntentBits } from "discord.js";
+import { Client, Events, GatewayIntentBits, MessagePayload } from "discord.js";
 import "dotenv/config";
 
 const heroIcons = [];
-const responses = [];
+const heroList: string[] = [];
+const responses: {
+  voiceline: string;
+  voicelineUrl: string;
+  voicelineData?: Buffer;
+  hero?: string;
+}[] = [];
 
 async function getAllHeroIcons() {
   return;
@@ -14,6 +20,11 @@ const wikiUrl = "https://dota2.fandom.com";
 async function getVoiceLineFromPage(path: string) {
   const responsePage = await fetch(`${wikiUrl}${path}`);
   const $ = cheerio.load(await responsePage.text());
+  const header = $("h1").text().split("/")[0].trim();
+
+  // callbacks + event loop is weird
+  const isHero = heroList.includes(header);
+  console.log(isHero, header);
 
   $(".mw-parser-output>ul>li").each((_, el) => {
     const voiceline = $(el)
@@ -24,12 +35,25 @@ async function getVoiceLineFromPage(path: string) {
       .replace(/u\s/g, "");
 
     const voicelineUrl = $(el).find("audio>source").attr("src");
-
-    responses.push({ voiceline, voicelineUrl });
+    if (voicelineUrl && voiceline)
+      responses.push({
+        voiceline,
+        voicelineUrl,
+        hero: isHero ? header : undefined,
+      });
   });
 }
 
 async function getAllVoiceLines() {
+  const dotaHeroesHtml = await (
+    await fetch("https://www.dotafire.com/dota-2/heroes")
+  ).text();
+  const $2 = cheerio.load(dotaHeroesHtml);
+
+  $2("div.hero-name").each((_, el) => {
+    heroList.push($2(el).text());
+  });
+
   const responsesPage = await fetch(`${wikiUrl}/wiki/Category:Responses`);
 
   const responsesPageText = await responsesPage.text();
@@ -49,28 +73,31 @@ async function getAllVoiceLines() {
 }
 
 async function main() {
-  const fetchingData = true;
+  let fetchingData = true;
   const client = new Client({
     intents: [
+      GatewayIntentBits.GuildMessageTyping,
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.GuildMessageReactions,
       GatewayIntentBits.GuildEmojisAndStickers,
       GatewayIntentBits.MessageContent,
+      GatewayIntentBits.DirectMessages,
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMembers,
     ],
     failIfNotExists: true,
   });
 
-  client.once(Events.ClientReady, (a) => {
+  client.on(Events.ClientReady, (a) => {
     console.info("Discord client ready.");
-    // Promise.all([getAllHeroIcons(), getAllVoiceLines()]).then(() => {
-    //   console.info("All voice lines fetched.", {
-    //     totalResponses: responses.length,
-    //   });
-    //   fetchingData = false;
-    // });
+    Promise.all([getAllHeroIcons(), getAllVoiceLines()]).then(() => {
+      console.info("All voice lines fetched.", {
+        totalResponses: responses.length,
+      });
+      fetchingData = false;
+    });
 
-    client.on(Events.MessageCreate, (message) => {
-      console.log("message received");
+    client.on(Events.MessageCreate, async (message) => {
       if (message.author.bot || message.webhookId) return;
 
       if (message.content === "!ping") {
@@ -81,7 +108,34 @@ async function main() {
       }
 
       if (message.content.startsWith("!line") && !fetchingData) {
-        const potentialVoiceLine = message.content.split("!line ")[1];
+        const potentialVoiceLine = message.content
+          .split("!line ")[1]
+          .toLowerCase();
+        const matchedVoiceline = responses.find(({ voiceline }) => {
+          return voiceline
+            .toLowerCase()
+            .includes(potentialVoiceLine.toLowerCase());
+        });
+        console.log({ potentialVoiceLine, matchedVoiceline });
+
+        if (matchedVoiceline) {
+          if (!matchedVoiceline.voicelineData) {
+            const buffer = await fetch(matchedVoiceline.voicelineUrl).then(
+              (res) => res.arrayBuffer(),
+            );
+            matchedVoiceline.voicelineData = Buffer.from(buffer);
+          }
+
+          message.reply({
+            // content: `${matchedVoiceline.hero}: ${matchedVoiceline.voiceline}`,
+            files: [
+              {
+                attachment: matchedVoiceline.voicelineData,
+                name: `${matchedVoiceline.voiceline.replace("sg", "_").toUpperCase()}.mp3`,
+              },
+            ],
+          });
+        }
       }
     });
 
@@ -89,8 +143,11 @@ async function main() {
       console.log("Guild available", guild.name);
     });
 
-    client.guilds.client.on(Events.MessageCreate, (message) => {
-      console.log("????");
+    client.on("debug", (message) => {
+      console.log(message);
+    });
+    client.on("error", (e) => {
+      console.log(e);
     });
   });
 
